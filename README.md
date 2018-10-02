@@ -32,7 +32,12 @@ On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer imp
 ~4096 tokens per batch, gradient aggregation over 2 update steps, 4 GPUs (effective batch size = ~25k tokens):
 >> 16336.97 tokens/ sec
 
- 
+
+Performance
+--------------
+Following the training regime described in [1], our base-transformer implementation achieves 27.45 BLEU on the WMT 2014 English-to-German task after 148k update steps, which is comparable to the 27.3 BLEU reported in [1] after 100k updates. We used newstest2014 for validation.
+
+
 Usage Instructions
 ------------------
 
