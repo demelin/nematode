@@ -27,7 +27,7 @@ moses_scripts=$tool_dir/mosesdecoder/scripts
 bpe_scripts=$tool_dir/subword-nmt
 venv=$home_dir/tensorflow_venv/bin/activate
 ppath=$home_dir/tensorflow_venv/bin/python3
-nematus_home=$home_dir/nematode
+nematode_home=$home_dir/nematode
 
 script_dir=`dirname $0`
 run_id=$1
@@ -59,7 +59,7 @@ echo "Trained model is saved to $run_dir . "
 
 model_name=nematode_model
 
-python $nematus_home/codebase/nmt.py \
+python $nematode_home/codebase/nmt.py \
     --save_to $run_dir/$model_name.npz \
     --model_name $model_name \
     --source_dataset $train_dir/train.de-en.bpe.$src \
