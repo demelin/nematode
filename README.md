@@ -17,8 +17,7 @@ Nematode requires the following dependencies to be satisfied:
  - tensorflow
  - CUDA >= 9.0
 
-To install tensorflow, we recommend following the steps at:
-  ( https://www.tensorflow.org/install/ )
+To install tensorflow, we recommend following the steps at https://www.tensorflow.org/install/
 
 
 Training speed
