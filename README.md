@@ -1,4 +1,4 @@
-NEMATODE: Light-weight transformer NMT
+nematode: light-weight transformer NMT
 -------
 
 Nematode is a light-weight neural machine translation (NMT) toolkit built around the allmighty 'Transformer' model [1]. As the name suggests, it is based on the Nematus project maintained by Rico Sennrich, Philip Williams, and others [2] (https://github.com/EdinburghNLP/nematus), from which it borrows several of its components, extending and modifying them as necessary. 
@@ -8,7 +8,7 @@ Why make another machine translation toolkit? Nematode was built with readabilit
 We also would like to thank the authors of the Tensor2Tensor [3] (https://github.com/tensorflow/tensor2tensor) and OpenNMT-py [4] (https://github.com/OpenNMT/OpenNMT-py) libraries for the valuable insights offered by their respective model implementations.
 
 
-Installation
+installation
 ------------
 
 Nematode requires the following dependencies to be satisfied:
@@ -20,7 +20,7 @@ Nematode requires the following dependencies to be satisfied:
 To install tensorflow, we recommend following the steps at https://www.tensorflow.org/install/
 
 
-Training speed
+training speed
 --------------
 
 On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer implementation reaches the following speeds:
@@ -32,12 +32,12 @@ On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer imp
 >> 16336.97 tokens/ sec
 
 
-Performance
+performance
 --------------
 Following the training regime described in [1], our base-transformer implementation achieves 27.45 BLEU on the WMT 2014 English-to-German task after 148k update steps, which is comparable to the 27.3 BLEU reported in [1] after 100k updates. We used newstest2014 for validation.
 
 
-Usage Instructions
+usage instructions
 ------------------
 
 To train a transformer model, modify the provided example training script - `example_training_script.sh` - as required.
@@ -132,13 +132,13 @@ To train a transformer model, modify the provided example training script - `exa
 | --translation_max_len INT | Maximum length of translation output sentence (default: 100) |
 
 
-Using Nematode
+using nematode
 ------------
 
 If you decide to use Nematode, please provide a link to this repository in a footnote. Thanks :) .
 
 
-References
+references
 ------------
 
 [1] Vaswani, Ashish, et al. "Attention is all you need." Advances in Neural Information Processing Systems. 2017.  
