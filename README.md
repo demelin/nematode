@@ -29,7 +29,7 @@ On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer imp
 ~4096 tokens per batch, no gradient aggregation, single GPU (effective batch size = ~4096 tokens):
 >> 4123.86 tokens/ sec
 
-~4096 tokens per batch, gradient aggregation over 2 update steps, 4 GPUs (effective batch size = ~25k tokens):
+~4096 tokens per batch, gradient aggregation over 2 update steps, 3 GPUs (effective batch size = ~25k tokens):
 >> 16336.97 tokens/ sec
 
 
