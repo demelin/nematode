@@ -23,7 +23,7 @@ To install tensorflow, we recommend following the steps at https://www.tensorflo
 training speed
 --------------
 
-On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer implementation reaches the following speeds:
+On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our base-transformer implementation reaches the following speeds:
 
 ~4096 tokens per batch, no gradient aggregation, single GPU (effective batch size = ~4096 tokens):
 >> 4123.86 tokens/ sec
