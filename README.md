@@ -13,7 +13,7 @@ installation
 
 Nematode requires the following dependencies to be satisfied:
 
- - Python >= 3.6
+ - Python >= 3.5.2
  - tensorflow
  - CUDA >= 9.0
 
