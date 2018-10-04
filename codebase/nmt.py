@@ -34,18 +34,8 @@ def create_model(config, source_vocab_size, target_vocab_size):
     # Set model-specific parameters
     if config.model_type == 'transformer':
         model = Transformer(config, source_vocab_size, target_vocab_size, config.model_name)
-    elif config.model_type == 'rnn':
-        # model = DeepRNN(config, source_vocab_size, target_vocab_size, config.model_name)
-        model = None
-    elif config.model_type == 'fan2rnn':
-        # model = FAN2RNN(config, source_vocab_size, target_vocab_size, config.model_name)
-        model = None
-    elif config.model_type == 'rnn2fan':
-        # model = RNN2FAN(config, source_vocab_size, target_vocab_size, config.model_name)
-        model = None
     else:
         raise ValueError('Model type {:s} is not supported'.format(config.model_type))
-
     return model
 
 
