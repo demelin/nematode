@@ -7,6 +7,7 @@ Why make another machine translation toolkit? Nematode was built with readabilit
 
 We also would like to thank the authors of the Tensor2Tensor [3] (https://github.com/tensorflow/tensor2tensor) and OpenNMT-py [4] (https://github.com/OpenNMT/OpenNMT-py) libraries for the valuable insights offered by their respective model implementations.
 
+Please note: While the core transformer implementation if fully functional, the toolkit continues to be a work-in-progress.
 
 installation
 ------------
