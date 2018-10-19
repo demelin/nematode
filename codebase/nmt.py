@@ -32,7 +32,6 @@ def create_model(config, source_vocab_size, target_vocab_size):
     else:
         # More models to be added later
         raise ValueError('Model type {:s} is not supported'.format(config.model_type))
-
     return model
 
 
