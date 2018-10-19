@@ -3,7 +3,7 @@ nematode: light-weight transformer NMT
 
 Nematode is a light-weight neural machine translation (NMT) toolkit built around the almighty 'Transformer' model [1]. As the name suggests, it is based on the Nematus project maintained by Rico Sennrich, Philip Williams, and others [2] (https://github.com/EdinburghNLP/nematus), from which it borrows several of its components, extending and modifying them as necessary. 
 
-Why make another machine translation toolkit? Nematode was built with readability and modifiability in mind (to help the maintainer better understand the inner workings of neural translation systems), and seeks to provide researchers with an easy to extend sandbox centered around a powerful state-of-the-art model. In this way, we hope to contribute our small part towards facilitating interesting research. It is implemented in TensorFlow and supports useful features such as dynamic batching, multi-GPU training, and gradient aggregation, which allow for replication of experiments originally conducted on a large number of GPUs on a limited computational budget. 
+Why make another machine translation toolkit? Nematode was built with readability and modifiability in mind (to help the maintainer better understand the inner workings of neural translation systems), and seeks to provide researchers with an easy to extend sandbox centered around a powerful state-of-the-art model. In this way, we hope to contribute our small part towards facilitating interesting research. Nematode is implemented in TensorFlow and supports useful features such as dynamic batching, multi-GPU training, gradient aggregation, and checkpoint averaging which allow for replication of experiments originally conducted on a large number of GPUs on a limited computational budget. 
 
 We also would like to thank the authors of the Tensor2Tensor [3] (https://github.com/tensorflow/tensor2tensor) and OpenNMT-py [4] (https://github.com/OpenNMT/OpenNMT-py) libraries for the valuable insights offered by their respective model implementations.
 
@@ -15,7 +15,7 @@ installation
 Nematode requires the following dependencies to be satisfied:
 
  - Python >= 3.5.2
- - tensorflow
+ - tensorflow >= 1.9
  - CUDA >= 9.0
 
 To install tensorflow, we recommend following the steps at https://www.tensorflow.org/install/
@@ -35,7 +35,7 @@ On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our base-transforme
 
 performance
 --------------
-Following the training regime described in [1], our base-transformer implementation achieves 27.45 BLEU on the WMT 2014 English-to-German task after 148k update steps, which is comparable to the 27.3 BLEU reported in [1] after 100k updates. We used newstest2014 for validation.
+Following the training regime described in [1], our base-transformer implementation achieves 27.45 validation BLEU on the WMT 2014 English-to-German task after 148k update steps. We used newstest2014 for validation.
 
 
 usage instructions
@@ -59,6 +59,7 @@ To train a transformer model, modify the provided example training script - `exa
 |---                       |--- |
 | --model_name MODEL_NAME | model file name (default: nematode_model) |
 | --model_type {transformer} | type of the model to be trained / used for inference (default: transformer) |
+| --embiggen_model | scales up the model to match the transformer-BIG specifications |
 | --embedding_size INT | embedding layer size (default: 512) |
 | --num_encoder_layers INT | number of encoder layers (default: 6) |
 | --num_decoder_layers INT | number of decoder layers (default: 6) |
@@ -77,8 +78,8 @@ To train a transformer model, modify the provided example training script - `exa
 | --maxibatch_size INT | maxi-batch size (number of mini-batches sorted by length) (default: 20) |
 | --max_epochs INT | maximum number of training epochs (default: 100)
 | --max_updates INT | maximum number of updates (default: 1000000)
-| --warmup_steps INT | number of initial updates during which the learning rate is increased linearly during learning rate scheduling (default: 8000) |
-| --learning_rate FLOAT | initial learning rate (default: 0.0002) |
+| --warmup_steps INT | number of initial updates during which the learning rate is increased linearly during learning rate scheduling (default: 4000) |
+| --learning_rate FLOAT | initial learning rate (default: 0.0002) (DOES NOTHING FOR NOW) |
 | --adam_beta1 FLOAT | exponential decay rate of the mean estimate (default: 0.9) |
 | --adam_beta2 FLOAT | exponential decay rate of the variance estimate (default: 0.98) |
 | --adam_epsilon FLOAT | prevents division-by-zero (default: 1e-09) |
@@ -90,7 +91,7 @@ To train a transformer model, modify the provided example training script - `exa
 | --grad_norm_threshold FLOAT | gradient clipping threshold - may improve training stability (default: 0.0) |
 | --teacher_forcing_off | disable teacher-forcing during model training (DOES NOTHING FOR NOW) |
 | --scheduled_sampling | enable scheduled sampling to mitigate exposure bias during model training (DOES NOTHING FOR NOW) |
-| --save_freq INT | save frequency (default: 5000) |
+| --save_freq INT | save frequency (default: 4000) |
 | --save_to PATH | model checkpoint location (default: model) |
 | --reload PATH | load existing model from this path; set to 'latest_checkpoint' to reload the latest checkpoint found in the --save_to directory |
 | --max_checkpoints INT | number of checkpoints to keep (default: 10) |
@@ -100,6 +101,7 @@ To train a transformer model, modify the provided example training script - `exa
 | --log_file PATH | log file location (default: None) |
 | --debug | enable the TF debugger |
 | --gradient_delay INT | number of steps by which the optimizer updates are to be delayed; longer delays correspond to larger effective batch sizes (default: 0) |
+| --track_grad_rates | track gradient norm rates and parameter-grad rates as TensorBoard summaries |
 
 #### validation parameters
 | parameter            | description |
