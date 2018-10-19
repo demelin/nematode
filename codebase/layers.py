@@ -231,6 +231,7 @@ class FeedForwardLayer(object):
         with tf.variable_scope(self.name, values=[inputs]):
             # Optionally apply dropout
             if self.dropout_rate > 0.0:
+                # TODO: Optionally extend with noise_shape
                 inputs = tf.layers.dropout(inputs, rate=self.dropout_rate, training=self.training)
             # Feed through a dense layer
             outputs = matmul_nd(inputs, self.weights)

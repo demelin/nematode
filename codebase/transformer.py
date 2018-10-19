@@ -24,7 +24,6 @@ class Transformer(object):
         self.float_dtype = tf.float32
 
         with tf.name_scope('{:s}_inputs_and_variables'.format(self.name)), tf.device('/cpu:0'):
-            # TODO: Revise device assignment once Data API supports GPU processing
             # Declare placeholders
             self.learning_rate = tf.placeholder(dtype=self.float_dtype, name='adaptive_learning_rate', shape=[])
             # Sampling epsilon placeholder for use with hybrid models
@@ -210,13 +209,15 @@ class TransformerEncoder(object):
                  embedding_layer,
                  training,
                  float_dtype,
-                 name):
+                 name,
+                 to_rnn=False):
         # Set attributes
         self.config = config
         self.embedding_layer = embedding_layer
         self.training = training
         self.float_dtype = float_dtype
         self.name = name
+        self.to_rnn = to_rnn  # Denotes whether the encoder is connected to an RNN decoder
 
         # Track layers
         self.encoder_stack = dict()
@@ -264,14 +265,19 @@ class TransformerEncoder(object):
             source_embeddings = self._embed(source_ids)
             # Obtain length and depth of the input tensors
             _, time_steps, depth = get_shape_list(source_embeddings)
-            # Transform input mask into attention mask
-            inverse_mask = tf.cast(tf.equal(source_mask, 0.0), dtype=self.float_dtype)
-            attn_mask = inverse_mask * -1e9
-            # Expansion to shape [batch_size, 1, 1, time_steps] is needed for compatibility with attention logits
-            attn_mask = tf.expand_dims(tf.expand_dims(attn_mask, 1), 1)
-            # Differentiate between self-attention and cross-attention masks for further, optional modifications
-            self_attn_mask = attn_mask
-            cross_attn_mask = attn_mask
+            if not self.to_rnn:
+                # Transform input mask into attention mask
+                inverse_mask = tf.cast(tf.equal(source_mask, 0.0), dtype=self.float_dtype)
+                attn_mask = inverse_mask * -1e9
+                # Expansion to shape [batch_size, 1, 1, time_steps] is needed for compatibility with attention logits
+                attn_mask = tf.expand_dims(tf.expand_dims(attn_mask, 1), 1)
+                # Differentiate between self-attention and cross-attention masks for further, optional modifications
+                self_attn_mask = attn_mask
+                cross_attn_mask = attn_mask
+            else:
+                # No mask manipulation required for the RNN decoder
+                self_attn_mask = None
+                cross_attn_mask = source_mask
             # Add positional encodings
             positional_signal = get_positional_signal(time_steps, depth, self.float_dtype)
             source_embeddings += positional_signal

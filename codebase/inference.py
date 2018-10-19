@@ -5,11 +5,11 @@ from layers import get_shape_list
 """ Inference functions for the transformer model. The generative process follows the 'Look, Generate, Update' paradigm, 
 as opposed to the 'Look, Update, Generate' paradigm employed by the deep-RNN. """
 
-
 # TODO: Add coverage penalty from Tu, Zhaopeng, et al.
 # TODO: "Modeling coverage for neural machine translation." arXiv preprint arXiv:1601.04811 (2016).
 
-# Note: Some inference mechanisms are adopted from the tensor2tensor library, with modifications
+
+# Note: Some inference mechanisms are adopted from the tensor2tensor library, with moderate modifications
 
 # ============================================== Helper functions ==================================================== #
 
@@ -91,7 +91,6 @@ def gather_top_sequences(all_sequences,
     gathered_memories = None
     if all_memories is not None:
         gathered_memories = gather_memories(all_memories, gather_coordinates)
-        # gathered_memories = all_memories
 
     return gathered_sequences, gathered_scores, gathered_eos_flags, gathered_memories
 
@@ -135,7 +134,6 @@ def greedy_search(decoding_function,
         # Extend next_id's dimensions to be compatible with input dimensionality for the subsequent step
         next_ids = tf.expand_dims(next_ids, time_dim)
         # Check if generation has concluded with <EOS>
-        # all_finished |= tf.equal(tf.squeeze(next_ids, axis=time_dim), eos_id)
         all_finished |= tf.equal(tf.reduce_prod(decoded_ids - eos_id, axis=time_dim), eos_id)
 
         return current_time_step + 1, all_finished, next_ids, decoded_ids, decoded_score, memories

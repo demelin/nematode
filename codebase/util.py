@@ -55,6 +55,8 @@ def factoredseq2words(seq, inverse_dictionaries, join=True):
         factors = []
         for j, factor in enumerate(word):
             if factor == 0:
+                # TODO: DEBUGGING
+                # factors.append(inverse_dictionaries[j][factor])
                 eos_reached = True
                 break
             elif factor in inverse_dictionaries[j]:
@@ -99,6 +101,7 @@ def assign_to_device(controller_device, operator_device):
 
     return _assign_op
 
+
 def get_devices(num_gpus):
     """ Returns devices available for training. """
     # CPU is assigned the role of the controller device
@@ -137,6 +140,7 @@ def count_parameters(config, float_dtype):
         estimate_memory = False
     # Calculate the number of model parameters + activations and, optionally, the associated memory footprint
     total_parameters = int(np.sum([np.prod(var.shape) for var in tf.trainable_variables()]))
+
     # TODO: Add a means for the calculation of activations
     model_size = total_parameters
     if estimate_memory and config.token_batch_size <= 0:

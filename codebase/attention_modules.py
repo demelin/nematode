@@ -155,7 +155,7 @@ class MultiHeadAttentionLayer(object):
         weighted_memories = tf.matmul(attn_weights, values)
         return weighted_memories
 
-    def forward(self, query_context, memory_context, attn_mask, layer_memories):
+    def forward(self, query_context, memory_context, attn_mask, layer_memories, global_context=None):
         """ Propagates the input information through the attention layer. """
         # The context for the query and the referenced memory is identical in case of self-attention
         if memory_context is None:
@@ -182,6 +182,7 @@ class MultiHeadAttentionLayer(object):
         weighted_memories = self._merge_from_heads(split_weighted_memories)
         # Feed through a dense layer
         projected_memories = self.context_projection.forward(weighted_memories)
+
         return projected_memories, layer_memories
 
 
@@ -413,45 +414,4 @@ class FineGrainedAttentionLayer(SingleHeadAttentionLayer):
         expanded_values = tf.expand_dims(values, axis=1)
         weighted_memories = \
             tf.reduce_sum(tf.multiply(tf.transpose(attn_weights, [1, 0, 2, 3]), expanded_values), axis=2)
-        return weighted_memories
-
-    def _attn(self, queries, keys, values, attn_mask):
-        """ For each encoder layer, weighs and combines time-step-wise hidden representation into a single layer
-        context state.  -- DEPRECATED, SINCE IT'S SLOW AND PROBABLY NOT ENTIRELY CORRECT """
-        # Account for beam-search
-        num_beams = tf.shape(queries)[0] // tf.shape(keys)[0]
-        keys = tf.tile(keys, [num_beams, 1, 1])
-        values = tf.tile(values, [num_beams, 1, 1])
-
-        def _logits_fn(query):
-            """ Computes position-wise attention scores. """
-            query = tf.expand_dims(query, 1)
-            # return tf.squeeze(self.attn_weight * (tf.nn.tanh(keys + query + norm_bias)), axis=2)
-            return self.attn_weight * tf.nn.tanh(keys + query)  # 4D output
-
-        def _weighting_fn(step_weights):
-            """ Computes position-wise context vectors. """
-            # step_weights = tf.expand_dims(step_weights, 2)
-            return tf.reduce_sum(tf.multiply(step_weights, values), axis=1)
-
-        # Obtain attention scores
-        transposed_queries = tf.transpose(queries, [1, 0, 2])
-        attn_logits = tf.map_fn(_logits_fn, transposed_queries)  # multiple queries per step are possible
-        if attn_mask is not None:
-            # attn_logits has shape=[batch, query_lengh, key_length, attn_features]
-            transposed_mask = \
-                tf.transpose(tf.tile(attn_mask, [tf.shape(queries)[0] // tf.shape(attn_mask)[0], 1, 1, 1]),
-                             [2, 0, 3, 1])
-            attn_logits += transposed_mask
-
-        # Compute the attention weights
-        attn_weights = tf.nn.softmax(attn_logits, axis=-2, name='attn_weights')
-
-        # Optionally apply dropout
-        if self.dropout_attn > 0.0:
-            attn_weights = tf.layers.dropout(attn_weights, rate=self.dropout_attn, training=self.training)
-
-        # Obtain context vectors
-        weighted_memories = tf.map_fn(_weighting_fn, attn_weights)
-        weighted_memories = tf.transpose(weighted_memories, [1, 0, 2])
         return weighted_memories

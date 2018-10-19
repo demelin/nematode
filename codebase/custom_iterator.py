@@ -39,7 +39,7 @@ def shuffle(files, exp_path, temporary=False):
         shuffled_files = []
         for file_path in files:
             _, filename = os.path.split(os.path.realpath(file_path))
-            shuffled_files.\
+            shuffled_files. \
                 append(tempfile.NamedTemporaryFile(mode='w+', prefix='{:s}.shuf'.format(filename), dir=exp_path))
     else:
         shuffled_files = [open('{:s}.shuf'.format(file_path), 'w') for file_path in files]
@@ -55,6 +55,25 @@ def shuffle(files, exp_path, temporary=False):
         [file.close() for file in shuffled_files]
 
     return shuffled_files
+
+
+def get_document_length(fileobject):
+    """ Fast way to compute the length of a document;
+     See: https://stackoverflow.com/questions/845058/how-to-get-line-count-cheaply-in-python """
+    # Set up source file and buffer
+    file = open(fileobject, 'rb')
+    lines = 0
+    buffer_size = 1024 * 1024
+    read_file = file.raw.read
+
+    # Count lines
+    buffer = read_file(buffer_size)
+    while buffer:
+        lines += buffer.count(b'\n')
+        buffer = read_file(buffer_size)
+    file.close()
+
+    return lines
 
 
 class TextIterator(object):
@@ -79,6 +98,8 @@ class TextIterator(object):
                  shuffle_each_epoch=False,
                  training=False):
 
+        self.config = config
+
         self.source_path = source_path
         self.target_path = target_path
         self.exp_path = exp_path
@@ -92,6 +113,10 @@ class TextIterator(object):
                 self.target = fopen(target_path, 'r')
             else:
                 self.target = None
+
+        # Get file length (only needed when using multiple GPUs)
+        self.num_lines = get_document_length(self.source_path) if self.config.num_gpus > 1 else 0
+        self.all_lines_read = False
 
         # Handle dictionaries
         self.source_dicts = source_dicts
@@ -119,15 +144,24 @@ class TextIterator(object):
         else:
             self.batch_size = sentence_batch_size
             self.token_batches = False
+
         self.maxibatch_size = \
-            (self.batch_size * config.maxibatch_size) if config.maxibatch_size > 0 else self.batch_size
+            (self.batch_size * self.config.maxibatch_size) if config.maxibatch_size > 0 else self.batch_size
+
+        # For multi-GPU training/ inference, keep track of items remaining in a maxi-batch as well as the remaining
+        # GPUs in the current GPU cycle
+        self.curr_maxibatch_size = 0
+        self.gpu_tracker = 0
 
         # Shrink batch size to accommodate beam search
         if not training:
             if config.translate_only and not config.translate_with_beam_search:
                 pass
             else:
-                self.batch_size = self.batch_size // max(1, np.floor(config.beam_size / 3))  # TODO: hack; needed?
+                # TODO: Should be adjusted vor CE-validation only, i.e. no diminishing
+                # TODO: Would require two different iterators for CE-validation and BLEU-validation
+                # self.batch_size = self.batch_size // max(1, np.floor(config.beam_size / 3))  # TODO: hack; needed?
+                self.batch_size = max(1, self.batch_size // config.beam_size)  # TODO: hack; needed?
 
         self.time_major_enc = time_major_enc
         self.time_major_dec = time_major_dec
@@ -139,7 +173,6 @@ class TextIterator(object):
 
         self.source_buffer = list()
         self.target_buffer = list()
-        self.maxibatch_overflow = list()
         self.batch_overflow = list()
 
         self.end_of_data = False
@@ -175,27 +208,17 @@ class TextIterator(object):
 
         source_batch = list()
         target_batch = list()
-
         source_buffer_size = 0
-
-        longest_source = 0
-        longest_target = 0
 
         # Fill buffer if empty
         assert len(self.source_buffer) == len(self.target_buffer), 'Buffer size mismatch!'
 
         if len(self.source_buffer) == 0:
-
-            # Carry over mini-batch overflow
-            try:
-                overflow_items = self.maxibatch_overflow.pop()
-                self.source_buffer.append(overflow_items[0])
-                self.target_buffer.append(overflow_items[1])
-            except IndexError:
-                pass
-
+            lines_read = 0
             try:
                 for source_sentence in self.source:
+                    lines_read += 1
+
                     source_sentence = source_sentence.split()
                     target_sentence = self.target.readline().split()
 
@@ -203,19 +226,23 @@ class TextIterator(object):
                     if self.skip_empty and (len(source_sentence) == 0 or len(target_sentence) == 0):
                         continue
                     # Skip lines exceeding the maximum length
-                    if self.max_len > 0 and (len(source_sentence) > self.max_len or len(target_sentence) > self.max_len):
+                    if self.max_len > 0 and \
+                            (len(source_sentence) > self.max_len or len(target_sentence) > self.max_len):
                         continue
+                    # Update buffer
+                    self.source_buffer.append(source_sentence)
+                    self.target_buffer.append(target_sentence)
                     # Maxi-batching
                     source_buffer_size = source_buffer_size + len(source_sentence) if self.token_batches \
                         else source_buffer_size + 1
-                    # Update buffer
-                    if source_buffer_size <= self.maxibatch_size:
-                        self.source_buffer.append(source_sentence)
-                        self.target_buffer.append(target_sentence)
-                    else:
-                        # Prevent line dropping
-                        self.maxibatch_overflow.append((source_sentence, target_sentence))
+
+                    # Check if all lines have been read
+                    if lines_read == self.num_lines:
+                        self.all_lines_read = True
+
+                    if source_buffer_size >= self.maxibatch_size:
                         break
+
             except IOError:
                 self.end_of_data = True
 
@@ -240,18 +267,31 @@ class TextIterator(object):
                 self.source_buffer.reverse()
                 self.target_buffer.reverse()
 
-        # Carry over batch overflow
-        try:
-            overflow_items = self.batch_overflow.pop()
-            source_batch.append(overflow_items[0])
-            target_batch.append(overflow_items[1])
-        except IndexError:
-            pass
+            # Update current max-batch size
+            self.curr_maxibatch_size = source_buffer_size
+
+        # Actual work here
+        # Note: <EOS> id = 0, <GO> id = 1, <UNK> id = 2
+        # Track spill-over items and remaining GPUs
+        spillover = False
+        gpus_left = 0
 
         while True:
+            # Check if batch size needs to be adjusted to distribute the remaining maxi-batch items among all GPUs
+            curr_batch_size = self.batch_size
+            if self.config.num_gpus > 1 and self.all_lines_read:
+                gpus_left = self.config.num_gpus - (self.gpu_tracker % self.config.num_gpus)
+                if self.curr_maxibatch_size // (gpus_left * curr_batch_size) == 0:
+                    # Distribute load
+                    curr_batch_size = int(np.ceil(self.curr_maxibatch_size / gpus_left))
+
             # Read from source file and map to word index
             try:
                 source_sentence = self.source_buffer.pop()
+                # Decrement the maxi-batch size
+                self.curr_maxibatch_size = self.curr_maxibatch_size - len(source_sentence) if self.token_batches \
+                    else self.curr_maxibatch_size - 1
+
                 source_indices = list()
                 for element in source_sentence:
                     # Account for factored inputs
@@ -269,46 +309,49 @@ class TextIterator(object):
                 source_batch.append(source_indices)
                 target_batch.append(target_indices)
 
-                longest_source = max(longest_source, len(source_indices))
-                longest_target = max(longest_target, len(target_indices))
+                longest_source = max([len(item) for item in source_batch])
+                longest_target = max([len(item) for item in target_batch])
 
-                if self.token_batches:
-                    if len(source_batch) * longest_source > self.batch_size or \
-                            len(target_batch) * longest_target > self.batch_size:
-                        # Place last batched sentence into the overflow buffer to minimize data loss
-                        self.batch_overflow.append((source_batch.pop(), target_batch.pop()))
+                effective_source_batch_size = \
+                    len(source_batch) * longest_source if self.token_batches else len(source_batch)
+                effective_target_batch_size = \
+                    len(target_batch) * longest_target if self.token_batches else len(target_batch)
 
-                        if len(self.source_buffer) == 0:
-                            # Carry over batch overflow
-                            try:
-                                overflow_items = self.batch_overflow.pop()
-                                source_batch.append(overflow_items[0])
-                                target_batch.append(overflow_items[1])
-                            except IndexError:
-                                pass
-                        break
-                else:
-                    if len(source_batch) >= self.batch_size or len(target_batch) >= self.batch_size:
+                if (effective_source_batch_size > curr_batch_size or effective_target_batch_size > curr_batch_size) \
+                        and len(source_batch) > 1:
+                    # Avoid dropping spillover maxi-batch items
+                    if gpus_left == 1 and len(self.source_buffer) < self.config.num_gpus and self.all_lines_read:
+                        spillover = True
 
-                        if len(self.source_buffer) == 0:
-                            # Carry over batch overflow
-                            try:
-                                overflow_items = self.batch_overflow.pop()
-                                source_batch.append(overflow_items[0])
-                                target_batch.append(overflow_items[1])
-                            except IndexError:
-                                pass
-                        break
+                        # Add the spillover items to the current batch
+                        if len(self.source_buffer) != 0:
+                            continue
+
+                    if not spillover:
+                        # Push last batched sentence onto the batch overflow stack to avoid data loss
+                        source_batch.pop()
+                        target_batch.pop()
+                        self.batch_overflow.append((source_sentence, target_sentence))
+                    break
+
             except IndexError:
-
-                # Carry over batch overflow
-                try:
-                    overflow_items = self.batch_overflow.pop()
-                    source_batch.append(overflow_items[0])
-                    target_batch.append(overflow_items[1])
-                except IndexError:
-                    pass
                 break
+
+        # Track available GPUs
+        if self.config.num_gpus > 1:
+            self.gpu_tracker += 1
+
+        # Push batch overflow items back onto the maxi-batch
+        try:
+            overflow_items = self.batch_overflow.pop()
+            self.source_buffer += [overflow_items[0]]
+            self.target_buffer += [overflow_items[1]]
+            # Increment maxi-batch size
+            self.curr_maxibatch_size = self.curr_maxibatch_size + len(overflow_items[0]) \
+                if self.token_batches else self.curr_maxibatch_size + 1
+
+        except IndexError:
+            pass
 
         return source_batch, target_batch
 
@@ -325,16 +368,11 @@ class TextIterator(object):
         # Fill buffer if empty
         if len(self.source_buffer) == 0:
 
-            # Carry over mini-batch overflow
-            try:
-                self.source_buffer.append(self.maxibatch_overflow.pop())
-            except IndexError:
-                pass
-
             try:
                 for source_sentence in self.source:
-                    source_sentence = source_sentence.split()
+                    lines_read = 0
 
+                    source_sentence = source_sentence.split()
                     # Skip empty lines
                     if self.skip_empty and len(source_sentence) == 0:
                         continue
@@ -342,12 +380,15 @@ class TextIterator(object):
                     source_buffer_size = source_buffer_size + len(source_sentence) if self.token_batches \
                         else source_buffer_size + 1
                     # Update buffer
-                    if source_buffer_size <= self.maxibatch_size:
-                        self.source_buffer.append(source_sentence)
-                    else:
-                        # Prevent line dropping
-                        self.maxibatch_overflow.append(source_sentence)
+                    self.source_buffer.append(source_sentence)
+
+                    # Check if all lines have been read
+                    if lines_read == self.num_lines:
+                        self.all_lines_read = True
+
+                    if source_buffer_size >= self.maxibatch_size:
                         break
+
             except IOError:
                 self.end_of_data = True
 
@@ -364,16 +405,29 @@ class TextIterator(object):
             else:
                 self.source_buffer.reverse()
 
-        # Carry over batch overflow
-        try:
-            source_batch.append(self.batch_overflow.pop())
-        except IndexError:
-            pass
+            # Update current max-batch size
+            self.curr_maxibatch_size = source_buffer_size
+
+        # Actual work here
+        # Note: <EOS> id = 0, <GO> id = 1, <UNK> id = 2
+        # Track spill-over items and remaining GPUs
+        spillover = False
+        gpus_left = 0
 
         while True:
-            # Read from source file and map to word index
+            # Check if batch size needs to be adjusted to distribute the remaining maxi-batch items among all GPUs
+            curr_batch_size = self.batch_size
+            if self.config.num_gpus > 1 and self.all_lines_read:
+                gpus_left = self.config.num_gpus - (self.gpu_tracker % self.config.num_gpus)
+                if self.curr_maxibatch_size // (gpus_left * curr_batch_size) == 0:
+                    # Distribute load
+                    curr_batch_size = int(np.ceil(self.curr_maxibatch_size / gpus_left))
             try:
                 source_sentence = self.source_buffer.pop()
+                # Decrement the maxi-batch size
+                self.curr_maxibatch_size = self.curr_maxibatch_size - len(source_sentence) if self.token_batches \
+                    else self.curr_maxibatch_size - 1
+
                 source_indices = list()
                 for element in source_sentence:
                     # Account for factored inputs
@@ -387,38 +441,38 @@ class TextIterator(object):
                 source_batch.append(source_indices)
                 longest_source = max(longest_source, len(source_indices))
 
-                if self.token_batches:
-                    if len(source_batch) * longest_source >= self.batch_size:
-                        # Place last batched sentence into the overflow buffer to minimize data loss
+                effective_source_batch_size = \
+                    len(source_batch) * longest_source if self.token_batches else len(source_batch)
+
+                if effective_source_batch_size > curr_batch_size and len(source_batch) > 1:
+                    # Avoid dropping spillover maxi-batch items
+                    if gpus_left == 1 and len(self.source_buffer) < self.config.num_gpus and self.all_lines_read:
+                        spillover = True
+                        # Add the spillover items to the current batch
+                        if len(self.source_buffer) != 0:
+                            continue
+
+                    if not spillover:
+                        # Push last batched sentence onto the batch overflow stack to avoid data loss
                         self.batch_overflow.append(source_batch.pop())
+                    break
 
-                        if len(self.source_buffer) == 0:
-                            # Carry over batch overflow
-                            try:
-                                source_batch.append(self.batch_overflow.pop())
-                            except IndexError:
-                                pass
-
-                        break
-                else:
-                    if len(source_batch) >= self.batch_size:
-
-                        if len(self.source_buffer) == 0:
-                            # Carry over batch overflow
-                            try:
-                                source_batch.append(self.batch_overflow.pop())
-                            except IndexError:
-                                pass
-
-                        break
             except IndexError:
-
-                # Carry over batch overflow
-                try:
-                    source_batch.append(self.batch_overflow.pop())
-                except IndexError:
-                    pass
                 break
+
+            # Track available GPUs
+            if self.config.num_gpus > 1:
+                self.gpu_tracker += 1
+
+            # Push batch overflow items back onto the maxi-batch
+            try:
+                popped_source = self.batch_overflow.pop()
+                self.source_buffer += popped_source
+                # Increment maxi-batch size
+                self.curr_maxibatch_size = self.curr_maxibatch_size + len(popped_source) \
+                    if self.token_batches else self.curr_maxibatch_size + 1
+            except IndexError:
+                pass
 
         return source_batch
 
@@ -483,7 +537,7 @@ class TextIterator(object):
                 target_out[sentence_id, :target_lengths[sentence_id]] = target_sentence
                 target_mask[sentence_id, :target_lengths[sentence_id] + 1] = 1.
 
-        # TODO: Remove hack once factored inputs are required (and adjust rest of code)
+        # TODO: Remove hack once factored inputs are supported (and adjust rest of code)
         source = np.squeeze(source, axis=0)
         return source, target_in, target_out, source_mask, target_mask
 
@@ -527,7 +581,7 @@ class TextIterator(object):
                 source[:, sentence_id, :source_lengths[sentence_id]] = list(zip(*source_sentence))
                 source_mask[sentence_id, :source_lengths[sentence_id] + 1] = 1.
 
-        # TODO: Remove hack once factored inputs are required (and adjust rest of code)
+        # TODO: Remove hack once factored inputs are supported (and adjust rest of code)
         source = np.squeeze(source, axis=0)
 
         # Add dummy placeholders

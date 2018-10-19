@@ -1,24 +1,19 @@
 """ Build a neural machine translation model based on the transformer architecture. """
 
-import json
-import argparse
-import numpy as np
-
 import os
 import sys
+import json
 import time
 import logging
+import argparse
 import tempfile
 import subprocess
-
+import numpy as np
 import tensorflow as tf
-import tensorflow.contrib.framework as tfr
-
 from datetime import datetime
 from collections import OrderedDict
 
 from transformer import Transformer
-
 from custom_iterator import TextIterator
 from ops import get_parallel_ops, get_single_ops, VariableUpdateTrainer
 from util import load_dict, seq2words, reverse_dict, get_visible_gpus, assign_to_device, count_parameters
@@ -34,76 +29,121 @@ def create_model(config, source_vocab_size, target_vocab_size):
     # Set model-specific parameters
     if config.model_type == 'transformer':
         model = Transformer(config, source_vocab_size, target_vocab_size, config.model_name)
-    elif config.model_type == 'rnn':
-        # model = DeepRNN(config, source_vocab_size, target_vocab_size, config.model_name)
-        model = None
-    elif config.model_type == 'fan2rnn':
-        # model = FAN2RNN(config, source_vocab_size, target_vocab_size, config.model_name)
-        model = None
-    elif config.model_type == 'rnn2fan':
-        # model = RNN2FAN(config, source_vocab_size, target_vocab_size, config.model_name)
-        model = None
     else:
+        # More models to be added later
         raise ValueError('Model type {:s} is not supported'.format(config.model_type))
 
     return model
 
 
-def session_setup(config, sess, model, ensemble_scope=None, training=False, max_checkpoints=10):
+def average_checkpoints(to_load, config, sess):
+    """ Averages model parameter values across the specified model checkpoints from the same training run;
+    derived from https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/utils/avg_checkpoints.py """
+
+    # Iterate over the specified checkpoints and assign them to a map
+    ckpt_map = dict()
+    for ckpt_path in config.reload:
+        ckpt_step = ckpt_path.split('-')[-1]
+        ckpt_map[ckpt_step] = ckpt_path
+    ckpt_steps = ckpt_map.keys()
+    latest_ckpt = max(ckpt_steps)
+
+    # Select variables to be loaded; to_load == None when training
+    if to_load is None:
+        to_load = {var.name: var for var in tf.global_variables()}
+
+    # Assess checkpoints from oldest to most recent and average their values; abort if checkpoint does not exist
+    var_names = to_load.keys()
+    var_values = {var_name: None for var_name in var_names}
+    var_dtypes = {var_name: None for var_name in var_names}
+
+    sorted_keys = sorted(list(ckpt_map.keys()))
+    reload_filename = ckpt_map[latest_ckpt]
+
+    logging.info('Reading-in {:d} checkpoints and averaging parameter values.'.format(len(config.reload)))
+    for ckpt_id, ckpt_key in enumerate(sorted_keys):
+        logging.info('Current checkpoint: {:s} ...'.format(ckpt_map[ckpt_key]))
+        # Open checkpoint
+        try:
+            reader = tf.contrib.framework.load_checkpoint(ckpt_map[ckpt_key])
+        except tf.errors.NotFoundError:
+            logging.info('Checkpoint not found. Exiting.')
+            sys.exit(0)
+
+        for var_name in var_names:
+            var_value = reader.get_tensor(var_name)
+            # Update accumulation maps
+            if var_name.startswith('global_step'):
+                var_values[var_name] = var_value
+            else:
+                var_values[var_name] = var_value if var_values[var_name] is None else var_values[var_name] + var_value
+                var_dtypes[var_name] = var_value.dtype
+
+            if ckpt_id == len(sorted_keys) - 1:
+                # Average collected values
+                var_values[var_name] /= len(config.reload)
+
+    logging.info('Assigning averaged values to variables.')
+    assign_ops = [tf.assign(to_load[var_name], var_values[var_name]) for var_name in var_names]
+    sess.run(tf.group(assign_ops))
+
+    return reload_filename
+
+
+def session_setup(config, sess, model, training=False, max_checkpoints=10):
     """ Prepares the model and auxiliary resources for operation. """
+    # TODO: A mechanism is needed for resuming multi-GPU training on a single GPU and vice-versa (mean / clones?)
     to_init = list()
-    if ensemble_scope is None:
-        # Exclude optimization variables to be loaded during inference (for greater model portability)
-        # TODO: Extend to ensembles?
-        # TODO: Moreover, a mechanism is needed for resuming multi-GPU training on a single GPU and vice-versa
-        to_load = None
-        if not training:
-            to_load = dict()
-            t_vars = tf.global_variables()
-            for var in t_vars:
-                if 'optimization' in var.name:
-                    to_init.append(var)
-                else:
-                    to_load[var.name.split(':')[0]] = var
+    # Exclude optimization variables to be loaded during inference (for greater model portability)
+    to_load = None
+    if not training:
+        to_load = dict()
+        model_vars = tf.global_variables()
+        for var in model_vars:
+            if 'optimization' in var.name:
+                to_init.append(var)
+            else:
+                to_load[var.name.split(':')[0]] = var
 
-        # If a stand-alone model is called, variable names don't need to be mapped
-        saver = tf.train.Saver(to_load, max_to_keep=max_checkpoints)
-    else:
-        # If the called model is part of an ensemble, map saved variables to the ensemble-scoped ones
-        variables = tfr.get_variables_to_restore()
-        to_load = {}
-        for var in variables:
-            if var.name.startswith(ensemble_scope):
-                base_name = var.name[len(ensemble_scope):].split(':')[0]
-                to_load[base_name] = var
-        saver = tf.train.Saver(to_load, max_to_keep=max_checkpoints)
+    # If a stand-alone model is called, variable names don't need to be mapped
+    saver = tf.train.Saver(to_load, max_to_keep=max_checkpoints)
+    reload_filename = None
+    no_averaging = True
 
-    if config.reload == 'latest_checkpoint':
-        checkpoint_dir = os.path.dirname(config.save_to)
-        reload_filename = tf.train.latest_checkpoint(checkpoint_dir)
-        if reload_filename is not None:
-            if os.path.basename(reload_filename).rsplit('-', 1)[0] != os.path.basename(config.save_to):
-                logging.error('Mismatching model filename found in the same directory while reloading from the latest '
-                              'checkpoint.')
-                sys.exit(1)
-            logging.info('Latest checkpoint found in directory {:s}.'.format(os.path.abspath(checkpoint_dir)))
-
-    elif config.reload == 'best_perplexity':
-        checkpoint_dir = os.path.dirname(config.save_to)
-        checkpoint_paths = tf.train.get_checkpoint_state(checkpoint_dir).all_model_checkpoint_paths
-        reload_filename = [path for path in checkpoint_paths if 'best_perplexity' in path][0]
-        if reload_filename is not None:
-            logging.info('Best perplexity checkpoint found in directory {:s}.'.format(os.path.abspath(checkpoint_dir)))
-
-    elif config.reload == 'best_bleu':
-        checkpoint_dir = os.path.dirname(config.save_to)
-        checkpoint_paths = tf.train.get_checkpoint_state(checkpoint_dir).all_model_checkpoint_paths
-        reload_filename = [path for path in checkpoint_paths if 'best_perplexity' in path][0]
-        if reload_filename is not None:
-            logging.info('Best BLEU checkpoint found in directory {:s}.'.format(os.path.abspath(checkpoint_dir)))
+    if type(config.reload) == list and len(config.reload) > 1:
+        reload_filename = average_checkpoints(to_load, config, sess)
+        no_averaging = False
 
     else:
-        reload_filename = config.reload
+        if config.reload is not None:
+            if config.reload[0] == 'latest_checkpoint':
+                checkpoint_dir = os.path.dirname(config.save_to)
+                reload_filename = tf.train.latest_checkpoint(checkpoint_dir)
+                if reload_filename is not None:
+                    if os.path.basename(reload_filename).rsplit('-', 1)[0] != os.path.basename(config.save_to):
+                        logging.error('Mismatching model filename found in the same directory while reloading '
+                                      'from the latest checkpoint.')
+                        sys.exit(1)
+                    logging.info('Latest checkpoint found in directory {:s}.'.format(os.path.abspath(checkpoint_dir)))
+
+            elif config.reload[0] == 'best_perplexity':
+                checkpoint_dir = os.path.dirname(config.save_to)
+                checkpoint_paths = tf.train.get_checkpoint_state(checkpoint_dir).all_model_checkpoint_paths
+                reload_filename = [path for path in checkpoint_paths if 'best_perplexity' in path][0]
+                if reload_filename is not None:
+                    logging.info('Best perplexity checkpoint found in directory {:s}.'
+                                 .format(os.path.abspath(checkpoint_dir)))
+
+            elif config.reload[0] == 'best_bleu':
+                checkpoint_dir = os.path.dirname(config.save_to)
+                checkpoint_paths = tf.train.get_checkpoint_state(checkpoint_dir).all_model_checkpoint_paths
+                reload_filename = [path for path in checkpoint_paths if 'best_perplexity' in path][0]
+                if reload_filename is not None:
+                    logging.info('Best BLEU checkpoint found in directory {:s}.'
+                                 .format(os.path.abspath(checkpoint_dir)))
+
+            else:
+                reload_filename = config.reload[0]
 
     # Initialize a progress tracking object and restore its values, if possible
     progress = TrainingProgress()
@@ -111,8 +151,8 @@ def session_setup(config, sess, model, ensemble_scope=None, training=False, max_
     progress.uidx = 0
     progress.eidx = 0
     progress.estop = False
-    progress.validation_perplexity = []
-    progress.validation_bleu = []
+    progress.validation_perplexity = OrderedDict()
+    progress.validation_bleu = OrderedDict()
 
     if reload_filename is not None and training:
         progress_path = '{:s}.progress.json'.format(reload_filename)
@@ -126,8 +166,7 @@ def session_setup(config, sess, model, ensemble_scope=None, training=False, max_
                         progress.eidx > config.max_epochs or \
                         progress.uidx >= config.max_updates:
                     logging.warning('Training is already complete. Disable reloading of training progress '
-                                    '(--no_reload_training_progress) or remove or modify progress file {:s} '
-                                    'to train anyway.'.format(progress_path))
+                                    'or remove or modify progress file {:s} to train anyway.'.format(progress_path))
                     sys.exit(0)
 
     # If no source from which model parameters should be re-loaded has been specified, initialize model randomly
@@ -139,8 +178,11 @@ def session_setup(config, sess, model, ensemble_scope=None, training=False, max_
     # Otherwise, load parameters from specified source file
     else:
         reload_path = os.path.abspath(reload_filename)
-        logging.info('Loading model parameters from file {:s}.'.format(reload_path))
-        saver.restore(sess, reload_path)
+        # For single checkpoint evaluation, load parameter values from checkpoint file
+        if no_averaging:
+            logging.info('Loading model parameters from file {:s}.'.format(reload_path))
+            saver.restore(sess, reload_path)
+        # Initialize optimization parameters from scratch
         if len(to_init) > 0:
             logging.info('Initializing the rest from scratch.')
             init_op = tf.variables_initializer(to_init)
@@ -189,6 +231,7 @@ def load_dictionaries(config):
 def update_learning_rate(config, model_global_step):
     """ Adjust the current learning rate for the optimization of the target model based on training progress;
     As of now, specific to the transformer; see chapter 5.3. in 'Attention is all you Need'. """
+    # TODO: Adjust scheduling as a function of the gradient delay parameter, i.e. larger batches -> higher LR?
     scheduled_step = \
         config.hidden_size ** (-0.5) * np.minimum((model_global_step + 1) ** (-0.5),
                                                   (model_global_step + 1) * (config.warmup_steps ** (-1.5)))
@@ -306,8 +349,17 @@ def train(config, sess_config):
         sess.add_tensor_filter('has_inf_or_nan', tf_debug.has_inf_or_nan)
 
     # Set up model trainer
-    trainer = VariableUpdateTrainer(model, config.num_encoder_layers, train_valid_iterator, config.num_gpus,
-                                    source_to_index['<EOS>'], config.gradient_delay, config.num_gpus >= 2, sess)
+    trainer = VariableUpdateTrainer(model,
+                                    config.num_encoder_layers,
+                                    train_valid_iterator,
+                                    config.num_gpus,
+                                    source_to_index['<EOS>'],
+                                    config.gradient_delay,
+                                    config.warmup_steps,
+                                    config.num_gpus >= 2,
+                                    sess,
+                                    track_grad_rates=config.track_grad_rates,
+                                    grad_norm_threshold=config.grad_norm_threshold)
 
     # Get validation and translation OPs
     if config.num_gpus >= 2:
@@ -353,7 +405,7 @@ def train(config, sess_config):
         else:
             summary_dir = os.path.abspath(os.path.dirname(config.save_to))
         train_summary_dir = summary_dir + '/{:s}_train'.format(model.name)
-        valid_summary_dir = summary_dir + '/{:s}_train'.format(model.name)
+        valid_summary_dir = summary_dir + '/{:s}_valid'.format(model.name)
         # Declare writers
         train_summary_writer = tf.summary.FileWriter(train_summary_dir, sess.graph)
         valid_summary_writer = tf.summary.FileWriter(valid_summary_dir, sess.graph)
@@ -362,13 +414,13 @@ def train(config, sess_config):
     train_handle, valid_handle = sess.run([train_iterator.string_handle(), valid_iterator.string_handle()])
 
     # Initialize metrics
+    model_global_step = 0
     training_losses = list()
     step_times = list()
     grad_norm_ratios = list()
     total_sentences, total_words = 0, 0
     scheduling_constant = 0
     sampling_epsilon = 1.0
-    model_global_step = 0
     early_stopped = False
 
     logging.info('[BEGIN TRAINING]')
@@ -418,7 +470,7 @@ def train(config, sess_config):
                 to_fetch = [model.global_step, batch_loss, words_processed, train_op, grad_norm_ratio]
 
                 # Optionally add summaries
-                if write_batch_summary:
+                if trainer.do_update and write_batch_summary:
                     to_fetch += [summaries]
 
                 pre_fetch_time = time.time()
@@ -461,14 +513,6 @@ def train(config, sess_config):
                     step_times = list()
                     training_losses = list()
                     total_words = 0
-
-                # Save model parameters
-                if config.save_freq and model_global_step % config.save_freq == 0:
-                    saver.save(sess, save_path=config.save_to, global_step=model_global_step)
-                    logging.info('[CHECKPOINT] Saved a scheduled model checkpoint to {:s}.'.format(config.save_to))
-                    logging.info('-' * 20)
-                    progress_path = '{:s}-{:d}.progress.json'.format(config.save_to, model_global_step)
-                    progress.save_to_json(progress_path)
 
                 def sample_model_output(random_sample=False, beam_search=False, n_displayed=10):
                     """ Displays model output for greedy decoding and decoding via weighted sampling. """
@@ -562,8 +606,10 @@ def train(config, sess_config):
                                                  valid_summary_writer, validation_global_step)
 
                         # Save best-BLEU checkpoints
-                        if len(progress.validation_bleu) == 0 or validation_bleu > max(progress.validation_bleu):
-                            progress.validation_bleu.append(validation_bleu)
+                        if len(progress.validation_bleu) == 0 or \
+                                validation_bleu > max(list(progress.validation_bleu.values())):
+                            progress.validation_bleu[int(model_global_step)] = validation_bleu
+
                             saver.save(sess, save_path='{:s}-best_bleu'.format(config.save_to))
                             logging.info(
                                 '[CHECKPOINT] Saved a best-BLEU model checkpoint to {:s}.'.format(config.save_to))
@@ -572,11 +618,12 @@ def train(config, sess_config):
                             logging.info('-' * 20)
                         else:
                             # Track BLEU
-                            progress.validation_bleu.append(validation_bleu)
+                            progress.validation_bleu[int(model_global_step)] = validation_bleu
 
                     if len(progress.validation_perplexity) == 0 or \
-                            validation_perplexity < min(progress.validation_perplexity):
-                        progress.validation_perplexity.append(validation_perplexity)
+                            validation_perplexity < min(list(progress.validation_perplexity.values())):
+                        progress.validation_perplexity[int(model_global_step)] = validation_perplexity
+
                         # Save model checkpoint in case validation performance has improved
                         saver.save(sess, save_path='{:s}-best_perplexity'.format(config.save_to))
                         logging.info(
@@ -587,7 +634,8 @@ def train(config, sess_config):
                         progress.bad_counter = 0
                     else:
                         # Track perplexity
-                        progress.validation_perplexity.append(validation_perplexity)
+                        progress.validation_perplexity[int(model_global_step)] = validation_perplexity
+
                         # Check for early-stopping
                         progress.bad_counter += 1
                         if progress.bad_counter > config.patience > 0:
@@ -598,6 +646,15 @@ def train(config, sess_config):
                             progress.estop = True
                             early_stopped = True
                             break
+
+                # Save model parameters
+                if config.save_freq and model_global_step % config.save_freq == 0:
+                    saver.save(sess, save_path=config.save_to, global_step=model_global_step)
+                    logging.info(
+                        '[CHECKPOINT] Saved a scheduled model checkpoint to {:s}.'.format(config.save_to))
+                    logging.info('-' * 20)
+                    progress_path = '{:s}-{:d}.progress.json'.format(config.save_to, model_global_step)
+                    progress.save_to_json(progress_path)
 
                 if config.max_updates and model_global_step % config.max_updates == 0:
                     logging.info('Maximum number of updates reached!')
@@ -656,16 +713,15 @@ def validation_loop(sess, model, ops, handles, valid_summary_writer, external=Fa
             # Note, per-sentence losses used by the model are already length-normalized
             fetches = sess.run([model.global_step, batch_loss_op, sentence_losses_op], feed_dict=feed_dict)
 
-        except tf.errors.OutOfRangeError:
-            # end_of_corpus = True
-            break
+            if fetches is not None:
+                valid_losses += [fetches[1]]
+                sentence_losses += fetches[2].tolist()
+                valid_global_step = fetches[0]
+                if len(sentence_losses) > 0:
+                    logging.info('Evaluated {:d} sentences'.format(len(sentence_losses)))
 
-        if fetches is not None:
-            valid_losses += [fetches[1]]
-            sentence_losses += fetches[2].tolist()
-            valid_global_step = fetches[0]
-            if len(sentence_losses) > 0:
-                logging.info('Evaluated {:d} sentences'.format(len(sentence_losses)))
+        except tf.errors.OutOfRangeError:
+            break
 
     # Report
     total_valid_loss = sum(valid_losses)
@@ -763,16 +819,16 @@ def translation_loop(sess, ops, feed_dict, target_dict, out_file, external=False
                 target_batch = sess.run(greedy_trans_op, feed_dict=feed_dict)
                 scores = None
 
+            if target_batch is not None:
+                translations.append(list(target_batch))
+                if scores is not None:
+                    beam_scores.append(list(scores))
+                total_sentences += target_batch.shape[0]
+                if len(translations) > 0:
+                    logging.info('Translated {:d} sentences'.format(total_sentences))
+
         except tf.errors.OutOfRangeError:
             break
-
-        if target_batch is not None:
-            translations.append(list(target_batch))
-            if scores is not None:
-                beam_scores.append(list(scores))
-            total_sentences += target_batch.shape[0]
-            if len(translations) > 0:
-                logging.info('Translated {:d} sentences'.format(total_sentences))
 
     duration = time.time() - start_time
 
@@ -843,18 +899,18 @@ def validate(config, sess_config):
 
     # Get model OPs
     if config.num_gpus >= 2:
-        valid_ops = get_parallel_ops(model, valid_iterator, config.num_gpus, source_to_index['<EOS>'], 'validation')
+        validation_ops = get_parallel_ops(model, valid_iterator, config.num_gpus, source_to_index['<EOS>'], 'training')
         translation_ops = \
             get_parallel_ops(model, valid_iterator, config.num_gpus, source_to_index['<EOS>'], 'translation')
         logging.info('[Parallel validation]')
     else:
-        valid_ops = get_single_ops(model, valid_iterator, config.num_gpus, source_to_index['<EOS>'], 'validation')
+        validation_ops = get_single_ops(model, valid_iterator, config.num_gpus, source_to_index['<EOS>'], 'training')
         translation_ops = \
             get_single_ops(model, valid_iterator, config.num_gpus, source_to_index['<EOS>'], 'translation')
         logging.info('[Single-device validation]')
 
     # Unpack OPs
-    batch_loss_op, sentence_losses_op, words_processed_op, summaries_op = valid_ops
+    _, batch_loss_op, sentence_losses_op, _, summaries_op = validation_ops
     source_op, target_op, greedy_translations_op, sampled_translations_op, beam_translations_op, beam_scores_op = \
         translation_ops
 
@@ -881,6 +937,8 @@ def validate(config, sess_config):
     valid_loss, valid_perplexity, sentence_losses, _ = \
         validation_loop(sess, model, valid_ops, None, None, external=True)
 
+    logging.info('-' * 20)
+
     # Calculate BLEU
     sess.run(valid_iterator.initializer)
     translation_ops = [greedy_translations_op, beam_translations_op, beam_scores_op]
@@ -902,6 +960,7 @@ def validate(config, sess_config):
 
 def translate(config, sess_config, model=None):
     """ Produces translations of the specified corpus using a trained translation model. """
+    # TODO: Not sure how this scales to larger files, may need to flush translations to a file as they are decoded
 
     if model is not None:
         assert config.reload is not None, \
@@ -1000,15 +1059,16 @@ def parse_args():
     network = parser.add_argument_group('network parameters')
     network.add_argument('--model_name', type=str, default='nematode_model',
                          help='model file name (default: %(default)s)')
-    network.add_argument('--model_type', type=str, default='transformer',
-                         choices=['transformer'],
+    network.add_argument('--model_type', type=str, default='transformer', choices=['transformer'],
                          help='type of the model to be trained / used for inference (default: %(default)s)')
+    network.add_argument('--embiggen_model', action='store_true',
+                         help='scales up the model to match the transformer-BIG specifications')
     network.add_argument('--embedding_size', type=int, default=512, metavar='INT',
                          help='embedding layer size (default: %(default)s)')
     network.add_argument('--num_encoder_layers', type=int, default=6, metavar='INT',
-                         help='number of encoder layers (default: %(default)s)')
+                         help='number of encoder layers')
     network.add_argument('--num_decoder_layers', type=int, default=6, metavar='INT',
-                         help='number of decoder layers (default: %(default)s)')
+                         help='number of decoder layers')
     network.add_argument('--ffn_hidden_size', type=int, default=2048, metavar='INT',
                          help='inner dimensionality of feed-forward sub-layers in FAN models (default: %(default)s)')
     network.add_argument('--hidden_size', type=int, default=512, metavar='INT',
@@ -1035,7 +1095,7 @@ def parse_args():
                           help='maximum number of training epochs (default: %(default)s)')
     training.add_argument('--max_updates', type=int, default=1000000, metavar='INT',
                           help='maximum number of updates (default: %(default)s)')
-    training.add_argument('--warmup_steps', type=int, default=8000, metavar='INT',
+    training.add_argument('--warmup_steps', type=int, default=4000, metavar='INT',
                           help='number of initial updates during which the learning rate is increased linearly during '
                                'learning rate scheduling(default: %(default)s)')
     training.add_argument('--learning_rate', type=float, default=2e-4, metavar='FLOAT',
@@ -1059,16 +1119,17 @@ def parse_args():
     training.add_argument('--label_smoothing_discount', type=float, default=0.1, metavar='FLOAT',
                           help='discount factor for regularization via label smoothing (default: %(default)s)')
     training.add_argument('--grad_norm_threshold', type=float, default=0., metavar='FLOAT',
-                          help='gradient clipping threshold - may improve training stability (default: %(default)s)')
+                          help='gradient clipping threshold - may improve training stability; '
+                               'disabled by default (default: %(default)s)')
     training.add_argument('--teacher_forcing_off', action='store_true',
                           help='disable teacher-forcing during model training')
     training.add_argument('--scheduled_sampling', action='store_true',
                           help='enable scheduled sampling to mitigate exposure bias during model training')
-    training.add_argument('--save_freq', type=int, default=5000, metavar='INT',
+    training.add_argument('--save_freq', type=int, default=4000, metavar='INT',
                           help='save frequency (default: %(default)s)')
     training.add_argument('--save_to', type=str, default='model', metavar='PATH',
                           help='model checkpoint location (default: %(default)s)')
-    training.add_argument('--reload', type=str, default=None, metavar='PATH',
+    training.add_argument('--reload', type=str, nargs='+', default=None, metavar='PATH',
                           help='load existing model from this path; set to \'latest_checkpoint\' '
                                'to reload the latest checkpoint found in the --save_to directory')
     training.add_argument('--max_checkpoints', type=int, default=10, metavar='INT',
@@ -1080,13 +1141,15 @@ def parse_args():
     training.add_argument('--num_gpus', type=int, default=0, metavar='INT',
                           help='number of GPUs to be used by the system; '
                                'no GPUs are used by default (default: %(default)s)')
-    training.add_argument('--gradient_delay', type=int, default=0, metavar='INT',
-                          help='number of steps by which the optimizer updates are to be delayed; '
-                               'longer delays correspond to larger effective batch sizes (default: %(default)s)')
     training.add_argument('--log_file', type=str, default=None, metavar='PATH',
                           help='log file location (default: %(default)s)')
     training.add_argument('--debug', action='store_true',
                           help='enable the TF debugger')
+    training.add_argument('--gradient_delay', type=int, default=0, metavar='INT',
+                          help='Amount of steps by which the optimizer updates are to be delayed; '
+                               'longer delays correspond to larger effective batch sizes (default: %(default)s)')
+    training.add_argument('--track_grad_rates', action='store_true',
+                          help='track gradient norm rates and parameter-grad rates as TensorBoard summaries')
 
     validation = parser.add_argument_group('validation parameters')
     validation.add_argument('--valid_source_dataset', type=str, default=None, metavar='PATH',
@@ -1127,11 +1190,11 @@ def parse_args():
                              help='translate using beam search')
     translation.add_argument('--length_normalization_alpha', type=float, default=0.6, metavar='FLOAT',
                              help='adjusts the severity of length penalty during beam decoding (default: %(default)s)')
-    translation.add_argument('--no_normalize', action='store_false',
+    translation.add_argument('--no_normalize', action='store_true',
                              help='disable length normalization')
     translation.add_argument('--full_beam', action='store_true',
                              help='return all translation hypotheses within the beam')
-    translation.add_argument('--translation_max_len', type=int, default=100, metavar='INT',
+    translation.add_argument('--translation_max_len', type=int, default=400, metavar='INT',
                              help='Maximum length of translation output sentence (default: %(default)s)')
 
     config = parser.parse_args()
@@ -1149,6 +1212,16 @@ def parse_args():
         sys.exit(1)
     config.source_vocab = config.dictionaries[0]
     config.target_vocab = config.dictionaries[-1]
+
+    # Embiggen the model
+    if config.embiggen_model:
+        config.embedding_size = 1024
+        config.ffn_hidden_size = 4096
+        config.hidden_size = 1024
+        config.num_heads = 16
+        config.dropout_embeddings = 0.3
+        config.adam_beta2 = 0.998
+        config.warmup_steps = 16000
 
     return config
 
@@ -1170,12 +1243,19 @@ if __name__ == "__main__":
         console.setLevel(logging.INFO)
         logging.getLogger('').addHandler(console)
 
+    # Log the configuration when (re-)starting training/ validation/ translation
+    logging.info('\nRUN CONFIGURATION')
+    logging.info('=================')
+    for key, val in config.__dict__.items():
+        logging.info('{:s}: {}'.format(key, val))
+    logging.info('=================\n')
+
     # Configure session
     sess_config = tf.ConfigProto(log_device_placement=False, allow_soft_placement=True)
     sess_config.gpu_options.allow_growth = False
 
     # Filter out memory warnings
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
     with tf.Graph().as_default():
         if config.translate_only:

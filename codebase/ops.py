@@ -1,5 +1,8 @@
+import copy
+
 import tensorflow as tf
 from util import get_visible_gpus, assign_to_device, get_devices
+
 
 # TODO: Currently, translation does not work with multiple-GPUs
 
@@ -7,6 +10,14 @@ from util import get_visible_gpus, assign_to_device, get_devices
 def get_parallel_ops(model, iterator, num_gpus, eos_id, mode, no_summaries=False):
     """ Defines the training and validation OPs for multi-GPU training.
     Vaguely based on: http://blog.s-schoener.com/2017-12-15-parallel-tensorflow-intro/ . """
+
+    def _pad_to_max_step_len(batch, max_step_len, is_3d=False):
+        """ Pads model translations to a uniform length as required for concatenation across towers. """
+        if is_3d:
+            padding = [[0, 0], [0, 0], [0, max_step_len - tf.shape(batch)[-1]]]
+        else:
+            padding = [[0, 0], [0, max_step_len - tf.shape(batch)[-1]]]
+        return tf.pad(batch, padding, 'constant', constant_values=eos_id)
 
     def _get_train_ops():
         """ Defines multi-device OPs used to train the model. """
@@ -25,6 +36,7 @@ def get_parallel_ops(model, iterator, num_gpus, eos_id, mode, no_summaries=False
                     with tf.device(assign_to_device(controller, gpu)), tf.name_scope(name):
                         # Compute and store losses and gradients
                         next_batch = iterator.get_next()
+
                         grads_and_vars, _, batch_loss, sentence_loss, words_processed, words_evaluated = \
                             model.train_model(next_batch)
                         # Training OPs
@@ -37,9 +49,10 @@ def get_parallel_ops(model, iterator, num_gpus, eos_id, mode, no_summaries=False
                     # Reuse variables
                     outer_scope.reuse_variables()
 
+                # TODO: Not sure if this does anything, as code is used at graph construction time
                 except tf.errors.OutOfRangeError:
                     break
-
+        # TODO: Same here
         if len(tower_grads_and_vars) == 0:
             raise tf.errors.OutOfRangeError
 
@@ -58,9 +71,9 @@ def get_parallel_ops(model, iterator, num_gpus, eos_id, mode, no_summaries=False
                 averaged_grad = tf.reduce_mean(grads, 0)
             else:
                 # Concatenate IndexedSlices (equivalent to averaging of tensors)
-                # Apply tower weights
                 values = [grads[tower_id].values * tower_weights[tower_id] for tower_id in range(len(grads))]
                 joint_values = tf.concat(values, axis=0)
+
                 joint_indices = tf.concat([grad.indices for grad in grads], axis=0)
                 averaged_grad = \
                     tf.IndexedSlices(values=joint_values, indices=joint_indices, dense_shape=grads[0].dense_shape)
@@ -80,6 +93,97 @@ def get_parallel_ops(model, iterator, num_gpus, eos_id, mode, no_summaries=False
         # Proto-OPs are forwarded to gradient accumulation or optimization
         return proto_train_ops
 
+    def _get_multi_valid_ops():
+        """ Defines multi-device OPs used to evaluate the model; used for the external validation step only.
+        CURRENTLY UNUSED. """
+        # TODO: DEPRECATED!
+        # Track tower-wise outputs
+        tower_batch_losses = list()
+        tower_sentence_losses = list()
+        tower_words = list()
+
+        with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE) as outer_scope:
+            for gpu_id, gpu in enumerate(operators):
+                name = 'tower_{}'.format(gpu_id)
+                # Assign variables to the CPU and tensor OPs to GPUs
+                with tf.device(assign_to_device(controller, gpu)), tf.name_scope(name):
+                    # Compute and store losses and gradients
+                    next_batch = iterator.get_next()
+                    _, _, _, batch_loss, sentence_loss, words_processed = model.train_model(next_batch)
+
+                    # Training/ validation OPs
+                    tower_batch_losses.append(batch_loss)
+                    tower_words.append(words_processed)
+                    tower_sentence_losses.append(sentence_loss)
+
+                # Reuse variables
+                outer_scope.reuse_variables()
+
+            # Merged validation OPs
+            averaged_batch_loss = tf.reduce_mean(tower_batch_losses)
+            joint_sentence_losses = tf.concat(tower_sentence_losses, axis=0)
+            total_words_processed = tf.reduce_sum(tower_words)
+            valid_ops = [averaged_batch_loss, joint_sentence_losses, total_words_processed]
+        return valid_ops
+
+    def _get_valid_ops():
+        """ Defines single-device OPs used to evaluate the model; used for the external validation step only. """
+        # TODO: DEPRECATED!
+        with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
+            with tf.device(assign_to_device(controller, operators[0])):
+                # Validation OPs
+                next_batch = iterator.get_next()
+
+                _, _, _, batch_loss, sentence_loss, words_processed = model.train_model(next_batch)
+
+        valid_ops = [batch_loss, sentence_loss, words_processed]
+        return valid_ops
+
+    def _get_multi_translation_ops():
+        """ Defines multi-device OPs used to obtain translations from the model. CURRENTLY UNUSED. """
+        # Track tower-wise outputs
+        tower_greedy_translations = list()
+        tower_sampled_translations = list()
+        tower_beam_translations = list()
+        tower_beam_scores = list()
+
+        with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE) as outer_scope:
+            for gpu_id, gpu in enumerate(operators):
+                name = 'tower_{}'.format(gpu_id)
+                # Assign variables to the CPU and tensor OPs to GPUs
+                with tf.device(assign_to_device(controller, gpu)), tf.name_scope(name):
+                    # Translation OPs (output has to be padded to same size before concatenation)
+                    next_batch = iterator.get_next()
+                    greedy_translations, _, _ = model.decode_greedy(next_batch)
+                    sampled_translations, _ = model.decode_with_sampling(next_batch)
+                    beam_translations, beam_scores = model.decode_with_beam_search(next_batch)
+
+                    tower_greedy_translations.append(greedy_translations)
+                    tower_sampled_translations.append(sampled_translations)
+                    tower_beam_translations.append(beam_translations)
+                    tower_beam_scores.append(beam_scores)
+                # Reuse variables
+                outer_scope.reuse_variables()
+
+        with tf.name_scope('translation'), tf.device('/cpu:0'):
+            # Merged translation OPs
+            greedy_mst = tf.reduce_max([tf.shape(batch)[-1] for batch in tower_greedy_translations])
+            sampled_mst = tf.reduce_max([tf.shape(batch)[-1] for batch in tower_sampled_translations])
+            beam_mst = tf.reduce_max([tf.shape(batch)[-1] for batch in tower_beam_translations])
+
+            padded_greedy_translators = [_pad_to_max_step_len(batch, greedy_mst) for batch in tower_greedy_translations]
+            padded_sampled_translators = [_pad_to_max_step_len(batch, sampled_mst) for batch in
+                                          tower_sampled_translations]
+            padded_beam_translators = [_pad_to_max_step_len(batch, beam_mst, True) for batch in tower_beam_translations]
+
+            joint_greedy_translators = tf.concat(padded_greedy_translators, axis=0)
+            joint_sampled_translators = tf.concat(padded_sampled_translators, axis=0)
+            joint_beam_translators = tf.concat(padded_beam_translators, axis=0)
+            joint_beam_scores = tf.concat(tower_beam_scores, axis=0)
+            translation_ops = \
+                [joint_greedy_translators, joint_sampled_translators, joint_beam_translators, joint_beam_scores]
+        return translation_ops
+
     def _get_translation_ops():
         """ Defines single-device OPs used to obtain translations from the model. """
         with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
@@ -94,8 +198,8 @@ def get_parallel_ops(model, iterator, num_gpus, eos_id, mode, no_summaries=False
                            beam_translations, beam_scores]
         return translation_ops
 
-    assert mode in ['training', 'validation', 'translation'], \
-        'Specified OP-retrieval mode must be training, validation, or translation'
+    assert mode in ['training', 'translation'], \
+        'Specified OP-retrieval mode must be training or translation'
 
     # Detect available GPUs
     controller, operators = get_devices(num_gpus)
@@ -123,6 +227,17 @@ def get_single_ops(model, iterator, num_gpus, unused_eos_id, mode, no_summaries=
             proto_train_ops.append(summaries)
         return proto_train_ops
 
+    def _get_valid_ops(next_batch):
+        """ Defines single-device OPs used to evaluate the model; used for the external validation step only. """
+        # TODO: DEPRECATED!
+        with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
+            with tf.device(assign_to_device(controller, operators[0])):
+                # Surface OPs
+                _, _, _, batch_loss, sentence_loss, words_processed = model.train_model(next_batch)
+
+        valid_ops = [batch_loss, sentence_loss, words_processed]
+        return valid_ops
+
     def _get_translation_ops(next_batch):
         """ Defines single-device OPs used to obtain translations from the model. """
         with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
@@ -136,7 +251,8 @@ def get_single_ops(model, iterator, num_gpus, unused_eos_id, mode, no_summaries=
                            beam_translations, beam_scores]
         return translation_ops
 
-    assert mode in ['training', 'translation'], 'Specified OP-retrieval mode must be training or translation'
+    assert mode in ['training', 'translation'], \
+        'Specified OP-retrieval mode must be training or translation'
 
     # Detect available GPUs
     controller, operators = get_devices(num_gpus)
@@ -154,18 +270,34 @@ class VariableUpdateTrainer(object):
     """ Class for training models with variable gradient aggregation updates;
     Inspired by the Adam-specific gradient aggregation implementation by fstahlberg@github
     (https://github.com/fstahlberg/tensor2tensor/blob/master/tensor2tensor/utils/largebatch_optimizer.py) """
-    def __init__(self, model, num_layers, iterator, num_gpus, eos_id, n_agg_steps, use_multi_gpu, session):
+
+    def __init__(self,
+                 model,
+                 num_layers,
+                 iterator,
+                 num_gpus,
+                 eos_id,
+                 n_agg_steps,
+                 warmup_steps,
+                 use_multi_gpu,
+                 session,
+                 track_grad_rates=False,
+                 grad_norm_threshold=0.0):
+
         self.model = model
         self.num_layers = num_layers
         self.iterator = iterator
         self.num_gpus = num_gpus
         self.eos_id = eos_id
         self.n_agg_steps = n_agg_steps if n_agg_steps > 0 else 1
+        self.warmup_steps = warmup_steps
         self.use_multi_gpu = use_multi_gpu
         self.session = session
+        self.track_grad_rates = track_grad_rates
+        self.grad_norm_threshold = grad_norm_threshold
 
         forward_fn = get_parallel_ops if use_multi_gpu else get_single_ops
-        self.train_ops = forward_fn(model, iterator, num_gpus, eos_id, mode='training')
+        self.train_ops = forward_fn(model, iterator, num_gpus, eos_id, mode='training', no_summaries=True)
 
         self.grads_cache = None
         self.batch_loss_cache = None
@@ -173,6 +305,7 @@ class VariableUpdateTrainer(object):
 
         self.optimizer = model.optimizer
         self.curr_agg_step = 0
+        self.curr_global_step = tf.Variable(tf.constant(0), trainable=False)
         self.do_update = False
 
         with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE) as outer_scope:
@@ -199,24 +332,84 @@ class VariableUpdateTrainer(object):
         zero_words_processed = tf.assign(self.words_processed_cache, self.words_processed_cache * 0)
         return tf.group(zero_grads, zero_batch_loss, zero_words_processed)
 
-    def _get_grad_norm_ratio(self, t_vars, grads):
-        """ Computes the grad norm ratio, as introduced in
+    def _get_grad_norm_ratios(self, t_vars, grads):
+        """ Computes grad-norm-ratios and parameter-grad-ratios, as introduced in
         Bapna, Ankur, et al. "Training Deeper Neural Machine Translation Models with Transparent Attention.",
-        arXiv preprint arXiv:1808.07561 (2018). """
-        initial_grads = list()
-        final_grads = list()
+        arXiv preprint arXiv:1808.07561 (2018) and
+        You, Y., I. Gitman, and B. Ginsburg. "Large batch training of convolutional networks."
+        ArXiv e-prints (2017), respectively."""
+        # Set up gradient tracking
+        grad_dict = dict()
+        sub_networks = ['encoder', 'decoder']
+        tracked_layers = ['layer_{:d}'.format(layer_id) for layer_id in range(1, self.num_layers + 1)]
+        final_layer = tracked_layers[-1]
+        for sn in sub_networks:
+            grad_dict[sn] = dict()
+            for tl in tracked_layers:
+                grad_dict[sn][tl] = list()
+
+        param_dict = copy.deepcopy(grad_dict)
+        grad_dict['embedding_table'] = list()
 
         # Compute average gradient for the initial and final layers
         for var_id, var in enumerate(t_vars):
-            if 'layer_1' in var.name:
-                initial_grads.append(tf.norm(grads[var_id], ord=2))
-            elif 'layer_{:d}'.format(self.num_layers) in var.name:
-                final_grads.append(tf.norm(grads[var_id], ord=2))
-            else:
-                pass
+            for sn in sub_networks:
+                if sn in var.name:
+                    for tl in tracked_layers:
+                        if tl in var.name:
+                            grad_dict[sn][tl].append(tf.norm(grads[var_id], ord=2))
+                            param_dict[sn][tl].append(tf.norm(var, ord=2))
 
-        # Compute grad norm ratio
-        return tf.reduce_mean(initial_grads) / tf.reduce_mean(final_grads)
+            if 'embedding_table' in var.name:
+                grad_dict['embedding_table'].append(tf.norm(grads[var_id], ord=2))
+
+        # Compute grad-norm-ratios
+        enc_layer_ratio = \
+            tf.reduce_mean(grad_dict['encoder']['layer_1']) / tf.reduce_mean(grad_dict['encoder'][final_layer])
+
+        if self.track_grad_rates:
+            enc_embed_ratio = \
+                tf.reduce_mean(grad_dict['embedding_table']) / tf.reduce_mean(grad_dict['encoder'][final_layer])
+            dec_embed_ratio = \
+                tf.reduce_mean(grad_dict['embedding_table']) / tf.reduce_mean(grad_dict['decoder'][final_layer])
+            dec_layer_ratio = \
+                tf.reduce_mean(grad_dict['decoder']['layer_1']) / tf.reduce_mean(grad_dict['decoder'][final_layer])
+
+            # Generate summaries
+            with tf.name_scope('grad_norm_ratio_summaries'):
+                enc_embed_ratio_summary = \
+                    tf.summary.scalar(name='encoder_embeddings_grad_norm_ratio', tensor=enc_embed_ratio)
+                enc_layer_ratio_summary = \
+                    tf.summary.scalar(name='encoder_layers_grad_norm_ratio', tensor=enc_layer_ratio)
+                dec_embed_ratio_summary = \
+                    tf.summary.scalar(name='decoder_embeddings_grad_norm_ratio', tensor=dec_embed_ratio)
+                dec_layer_ratio_summary = \
+                    tf.summary.scalar(name='decoder_layers_grad_norm_ratio', tensor=dec_layer_ratio)
+                # Merge
+                grad_norm_summaries = tf.summary.merge([enc_embed_ratio_summary, enc_layer_ratio_summary,
+                                                        dec_embed_ratio_summary, dec_layer_ratio_summary],
+                                                       name='grad_norm_ratio_summaries')
+
+            # Compute parameter-grad-ratios
+            with tf.name_scope('param_grad_ratio_summaries'):
+                param_grad_ratio_summaries = list()
+                for sn in sub_networks:
+                    for tl in tracked_layers:
+                        param_grad_ratio = tf.reduce_mean(param_dict[sn][tl]) / tf.reduce_mean(grad_dict[sn][tl])
+                        param_grad_ratio_name = '{:s}_{:s}_param_grad_ratio'.format(sn, tl)
+                        param_grad_ratio_summaries.append(
+                            tf.summary.scalar(name=param_grad_ratio_name, tensor=param_grad_ratio))
+                # Merge
+                with tf.name_scope('param_grad_ratio_summaries'):
+                    param_grad_ratio_summaries = \
+                        tf.summary.merge(param_grad_ratio_summaries, name='param_grad_ratio_summaries')
+            # Merge
+            grad_summaries = \
+                tf.summary.merge([grad_norm_summaries, param_grad_ratio_summaries], name='grad_summaries')
+        else:
+            grad_summaries = None
+
+        return enc_layer_ratio, grad_summaries
 
     def _update(self):
         """ Updates gradients and metrics. """
@@ -233,7 +426,7 @@ class VariableUpdateTrainer(object):
 
         # Aggregate
 
-        # Sophisticated gradient monitoring
+        # 'Sophisticated' gradient monitoring
         for grad_id, step_grad in enumerate(step_grads):
             if step_grad is None:
                 print(t_vars[grad_id])
@@ -254,7 +447,7 @@ class VariableUpdateTrainer(object):
         # Grad norm ratio
         grad_norm_ratio_op = tf.no_op()
         # Define summaries
-        summaries = self.model.get_summaries(batch_loss)
+        summaries = tf.no_op()
         return [batch_loss, words_processed, train_op, grad_norm_ratio_op, summaries]
 
     def _update_and_apply(self):
@@ -263,14 +456,26 @@ class VariableUpdateTrainer(object):
         t_vars, grads, batch_loss, words_processed = self._update()
         # Normalize
         grads = [tf.assign(grad, grad / self.n_agg_steps) for grad in grads]
+        # Optionally clip gradients after the warm-up phase concluded
+        grads = tf.cond(tf.logical_and(tf.greater(self.grad_norm_threshold, 0.0),
+                                       tf.greater_equal(self.curr_global_step, self.warmup_steps)),
+                        lambda: [tf.clip_by_norm(grad, self.grad_norm_threshold) for grad in grads],
+                        lambda: grads)
+
         # Define train OP
         grads_and_vars = [(grad, t_vars[grad_id]) for grad_id, grad in enumerate(grads)]
         train_op = self.optimizer.apply_gradients(grads_and_vars, global_step=self.model.global_step)
+        # Update trainer-internal global step
+        gs_update = tf.assign_add(self.curr_global_step, 1)
         # Grad norm ratio
-        grad_norm_ratio_op = self._get_grad_norm_ratio(t_vars, grads)
-        # Define summaries
+        grad_norm_ratio_op, grad_summaries = self._get_grad_norm_ratios(t_vars, grads)
+        # Define model summaries
         summaries = self.model.get_summaries(batch_loss)
-        return [batch_loss / self.n_agg_steps, words_processed, train_op, grad_norm_ratio_op, summaries]
+        if grad_summaries is not None:
+            # Merge with grad norm ratio summaries
+            summaries = tf.summary.merge([summaries, grad_summaries], name='trainer_summaries')
+        return [batch_loss / self.n_agg_steps, words_processed, tf.group(train_op, gs_update), grad_norm_ratio_op,
+                summaries]
 
     def forward(self):
         with tf.name_scope('optimization'), tf.device('/cpu:0'):

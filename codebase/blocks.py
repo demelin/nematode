@@ -7,9 +7,6 @@ from layers import \
 from attention_modules import MultiHeadAttentionLayer
 
 
-# from attention_modules import SingleHeadAttentionLayer, FineGrainedAttentionLayer
-
-
 class AttentionBlock(object):
     """ Defines a single attention block (referred to as 'sub-layer' in the paper) comprising of a single multi-head
     attention layer preceded by a pre-processing layer and followed by a post-processing layer. """
@@ -19,17 +16,13 @@ class AttentionBlock(object):
                  float_dtype,
                  self_attention,
                  training,
-                 from_rnn=False,
-                 tie_attention=False):
+                 from_rnn=False):
         # Set attributes
         self.self_attention = self_attention
-        if not tie_attention:
-            if self_attention:
-                attn_name = 'self_attn'
-            else:
-                attn_name = 'cross_attn'
+        if self_attention:
+            attn_name = 'self_attn'
         else:
-            attn_name = 'tied_attn'
+            attn_name = 'cross_attn'
 
         memory_size = config.hidden_size
         if from_rnn:
