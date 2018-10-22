@@ -726,7 +726,7 @@ def validation_loop(sess, model, ops, handles, valid_summary_writer, external=Fa
     # Report
     total_valid_loss = sum(valid_losses)
     mean_valid_loss = total_valid_loss / len(valid_losses)
-    valid_perplexity = 2 ** mean_valid_loss
+    valid_perplexity = np.exp(mean_valid_loss)
     if not external:
         current_time = datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')
         logging.info('-' * 20)
@@ -953,7 +953,7 @@ def validate(config, sess_config):
     logging.info('-' * 20)
 
     mean_valid_loss = sum(sentence_losses) / len(sentence_losses)
-    valid_perplexity = 2 ** mean_valid_loss
+    valid_perplexity = np.exp(mean_valid_loss)
     logging.info('Loss/ word: {:.4f} | Perplexity: {:.4f} | BLEU: {:.4f}'
                  .format(mean_valid_loss, valid_perplexity, valid_bleu))
 
