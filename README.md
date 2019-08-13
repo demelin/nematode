@@ -1,4 +1,4 @@
-# NEMATODE: Light-weight neural machine translation toolkit  
+# NEMATODE: Light-weight NMT toolkit  
 
 **Note: Current implementation is outdated and will be brought up to date soon.**
 
