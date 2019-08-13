@@ -1,53 +1,39 @@
-nematode: light-weight transformer NMT
--------
+# NEMATODE: Light-weight neural machine translation toolkit  
 
-Note: Current implementation is outdated and will be brought up to date soon.
+**Note: Current implementation is outdated and will be brought up to date soon.**
 
-Nematode is a light-weight neural machine translation (NMT) toolkit built around the almighty 'Transformer' model [1]. As the name suggests, it is based on the Nematus project maintained by Rico Sennrich, Philip Williams, and others [2] (https://github.com/EdinburghNLP/nematus), from which it borrows several of its components, extending and modifying them as necessary. 
+## Dependencies
+- python >= 3.5.2
+- tensorflow >= 1.9
+- CUDA >= 9.0
 
-Why make another machine translation toolkit? Nematode was built with readability and modifiability in mind (to help the maintainer better understand the inner workings of neural translation systems), and seeks to provide researchers with an easy to extend sandbox centered around a powerful state-of-the-art model. In this way, we hope to contribute our small part towards facilitating interesting research. Nematode is implemented in TensorFlow and supports useful features such as dynamic batching, multi-GPU training, gradient aggregation, and checkpoint averaging which allow for replication of experiments originally conducted on a large number of GPUs on a limited computational budget. 
+## Description
+NEMATODE is a light-weight neural machine translation toolkit built around the [transformer](https://arxiv.org/pdf/1706.03762.pdf) model. As the name suggests, it was originally derived from the [Nematus](https://github.com/EdinburghNLP/nematus) toolkit and eventually deviated from Nematus into a stand-alone project, by adopting the transformer model and a custom data serving pipeline. Many of its components (most notably the transformer implementation) were subsequently merged into Nematus.
 
-We also would like to thank the authors of the Tensor2Tensor [3] (https://github.com/tensorflow/tensor2tensor) and OpenNMT-py [4] (https://github.com/OpenNMT/OpenNMT-py) libraries for the valuable insights offered by their respective model implementations.
+## Motivation
+NEMATODE is maintained with readability and modifiability in mind, and seeks to provide users with an easy to extend sandbox centered around a state-of-the-art NMT model. In this way, we hope to contribute our small part towards facilitating interesting research. Nematode is implemented in TensorFlow and supports useful features such as **dynamic batching**, **multi-GPU training**, **gradient aggregation**, and **checkpoint averaging** which allow for replication of experiments originally conducted on a large number of GPUs on a limited computational budget. 
 
-Please note: While the core transformer implementation if fully functional, the toolkit continues to be a work-in-progress.
+## Acknowledgements
+We would like to thank the authors of the [Tensor2Tensor](https://github.com/tensorflow/tensor2tensor) and [OpenNMT-py](https://github.com/OpenNMT/OpenNMT-py) libraries for the valuable insights offered by their respective model implementations.
 
-installation
-------------
+## Caveats
+While the core transformer implementation if fully functional, the toolkit continues to be a work-in-progress.
 
-Nematode requires the following dependencies to be satisfied:
-
- - Python >= 3.5.2
- - tensorflow >= 1.9
- - CUDA >= 9.0
-
-To install tensorflow, we recommend following the steps at https://www.tensorflow.org/install/
-
-
-training speed
---------------
-
-On an Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our base-transformer implementation reaches the following speeds:
+## Performance
+On one Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer-BASE implementation achieves the following training speeds:
 
 ~4096 tokens per batch, no gradient aggregation, single GPU (effective batch size = ~4096 tokens):
->> 4123.86 tokens/ sec
+>> 4123.86 tokens/sec
 
 ~4096 tokens per batch, gradient aggregation over 2 update steps, 3 GPUs (effective batch size = ~25k tokens):
->> 16336.97 tokens/ sec
+>> 16336.97 tokens/sec
 
+Following the training regime described in ['Attention is All You Need](https://arxiv.org/pdf/1706.03762.pdf), our transformer-BASE implementation achieves 27.45 BLEU on the WMT2014 English-to-German task after 148k update steps (measured on newstest2014).
 
-performance
---------------
-Following the training regime described in [1], our base-transformer implementation achieves 27.45 validation BLEU on the WMT 2014 English-to-German task after 148k update steps. We used newstest2014 for validation.
-
-
-usage instructions
-------------------
-
+## Use
 To train a transformer model, modify the provided example training script - `example_training_script.sh` - as required.
 
-#### `nematode/nmt.py` : trains a new model
-
-#### data set parameters
+#### Data parameters
 | parameter            | description |
 |---                   |--- |
 | --source_dataset PATH | parallel training corpus (source) |
@@ -56,7 +42,7 @@ To train a transformer model, modify the provided example training script - `exa
 | --max_vocab_source INT | maximum length of the source vocabulary; unlimited by default (default: -1) |
 | --max_vocab_target INT | maximum length of the target vocabulary; unlimited by default (default: -1) |
 
-#### network parameters
+#### Network parameters
 | parameter            | description |
 |---                       |--- |
 | --model_name MODEL_NAME | model file name (default: nematode_model) |
@@ -71,7 +57,7 @@ To train a transformer model, modify the provided example training script - `exa
 | --untie_decoder_embeddings | untie the decoder embedding matrix from the output projection matrix |
 | --untie_enc_dec_embeddings | untie the encoder embedding matrix from the embedding and projection matrices in the decoder |
 
-#### training parameters
+#### Training parameters
 | parameter            | description |
 |---                   |--- |
 | --max_len INT | maximum sequence length for training and validation (default: 100) |
@@ -105,7 +91,7 @@ To train a transformer model, modify the provided example training script - `exa
 | --gradient_delay INT | number of steps by which the optimizer updates are to be delayed; longer delays correspond to larger effective batch sizes (default: 0) |
 | --track_grad_rates | track gradient norm rates and parameter-grad rates as TensorBoard summaries |
 
-#### validation parameters
+#### Development parameters
 | parameter            | description |
 |---                   |--- |
 | --valid_source_dataset PATH | source validation corpus (default: None) |
@@ -115,7 +101,7 @@ To train a transformer model, modify the provided example training script - `exa
 | --validate_only | perform external validation with a pre-trained model |
 | --bleu_script PATH | path to the external validation script (default: None); receives path of translation source file; must write a single score to STDOUT. |
 
-#### display parameters
+#### Reporting parameters
 | parameter            | description |
 |---                   |--- |
 | --disp_freq INT | training metrics display frequency (default: 100) |
@@ -124,7 +110,7 @@ To train a transformer model, modify the provided example training script - `exa
 |  --beam_freq INT | beam search sampling frequency (default: 10000) |
 |  --beam_size INT | size of the decoding beam (default: 4) |
 
-#### translation parameters
+#### Translation parameters
 | parameter            | description |
 |---                   |--- |
 | --translate_only | translate a specified corpus using a pre-trained model |
@@ -137,22 +123,8 @@ To train a transformer model, modify the provided example training script - `exa
 | --translation_max_len INT | Maximum length of translation output sentence (default: 100) |
 
 
-using nematode
-------------
+## Citation
+If you decide to use NEMATODE in your work, please provide a link to this repository in the corresponding documentation.
 
-If you decide to use Nematode, please provide a link to this repository in a footnote. Thanks :) .
-
-
-references
-------------
-
-[1] Vaswani, Ashish, et al. "Attention is all you need." Advances in Neural Information Processing Systems. 2017.  
-[2] Sennrich, Rico, et al. "Nematus: a toolkit for neural machine translation." arXiv preprint arXiv:1703.04357 (2017).  
-[3] Vaswani, Ashish, et al. "Tensor2tensor for neural machine translation." arXiv preprint arXiv:1803.07416 (2018).  
-[4] Klein, Guillaume, et al. "Opennmt: Open-source toolkit for neural machine translation." arXiv preprint arXiv:1701.02810 (2017).  
-
-
-TODO
-------------
-
-1. Extend the readme
+## TODO
+1. Update code
