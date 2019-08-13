@@ -28,7 +28,7 @@ On one Nvidia GeForce GTX Titan X (Pascal) GPU with CUDA 9.0, our transformer-BA
 ~4096 tokens per batch, gradient aggregation over 2 update steps, 3 GPUs (effective batch size = ~25k tokens):
 >> 16336.97 tokens/sec
 
-Following the training regime described in ['Attention is All You Need](https://arxiv.org/pdf/1706.03762.pdf), our transformer-BASE implementation achieves 27.45 BLEU on the WMT2014 English-to-German task after 148k update steps (measured on newstest2014).
+Following the training regime described in ['Attention is All You Need'](https://arxiv.org/pdf/1706.03762.pdf), our transformer-BASE implementation achieves 27.45 BLEU on the WMT2014 English-to-German task after 148k update steps (measured on newstest2014).
 
 ## Use
 To train a transformer model, modify the provided example training script - `example_training_script.sh` - as required.
